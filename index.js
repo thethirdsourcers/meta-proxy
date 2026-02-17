@@ -60,10 +60,28 @@ app.get('/', (req, res) => {
 app.all('*', async (req, res) => {
     if (req.path === '/_proxy/register' || req.path === '/') return;
 
+    // --- WEBHOOK VERIFICATION HANDSHAKE (GET) ---
+    // Handle this directly in the proxy to ensure Meta verification always works 
+    // even if the local tunnel is waking up or temporarily lost in memory.
+    if (req.method === 'GET' && req.path === '/api/social/webhook') {
+        const mode = req.query['hub.mode'];
+        const token = req.query['hub.verify_token'];
+        const challenge = req.query['hub.challenge'];
+
+        const VERIFY_TOKEN = "azmew_token";
+
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log("✅ Proxy-level Webhook verification successful.");
+            res.setHeader('Content-Type', 'text/plain');
+            return res.status(200).send(challenge);
+        }
+    }
+
     if (!localTunnelUrl) {
         return res.status(503).json({
             error: "No local development tunnel is currently registered.",
-            help: "Run your local backend tunnel script (run.sh) to register."
+            help: "Run your local backend tunnel script (run.sh) to register.",
+            lastActivity: lastRegistered || "none"
         });
     }
 
