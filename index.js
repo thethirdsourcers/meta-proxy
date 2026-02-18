@@ -61,6 +61,14 @@ app.post('/_proxy/register', async (req, res) => {
         return res.status(400).json({ error: "Invalid tunnel URL" });
     }
 
+    // SAFETY CHECK: Prevent registering localhost or 127.0.0.1
+    if (url.includes("localhost") || url.includes("127.0.0.1")) {
+        return res.status(400).json({
+            error: "Cannot register localhost as a tunnel URL.",
+            help: "The proxy runs on Vercel and cannot reach your computer via 'localhost'. Ensure Pinggy has provided a public .pinggy.link URL."
+        });
+    }
+
     const success = await setTunnelUrl(url);
     const timestamp = new Date().toISOString();
 
@@ -144,6 +152,7 @@ app.all('*', async (req, res) => {
                 host: new URL(localTunnelUrl).host // Crucial for tunnel providers like Pinggy/Ngrok
             },
             timeout: 30000, // 30s timeout to prevent hanging
+            maxRedirects: 0, // IMPORTANT: Do not follow redirects! Let the browser handle them.
             validateStatus: () => true // Forward all response codes
         });
 
