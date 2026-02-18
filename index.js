@@ -51,7 +51,7 @@ async function getLastRegistered() {
 // SECURE REGISTRATION: Update the local tunnel URL
 app.post('/_proxy/register', async (req, res) => {
     const { url, token } = req.body;
-    const SECRET_TOKEN = process.env.PROXY_AUTH_TOKEN || "azmew_dev_secret";
+    const SECRET_TOKEN = process.env.PROXY_AUTH_TOKEN || "azmew_token";
 
     if (token !== SECRET_TOKEN) {
         return res.status(401).json({ error: "Unauthorized registration" });
