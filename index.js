@@ -1,18 +1,55 @@
 const express = require('express');
 const axios = require('axios');
+const { Redis } = require('@upstash/redis');
 const app = express();
 
 app.use(express.json());
 
-// In-memory store for the local tunnel URL.
-// Warning: On Vercel (serverless), this may reset on cold starts.
-// For production stability, consider using @vercel/kv.
-let localTunnelUrl = "";
-let lastRegistered = null;
+// --- PERSISTENT STORAGE via Upstash Redis ---
+// This replaces the in-memory variable that was lost on Vercel cold starts.
+// Configure via Vercel Integration or environment variables:
+//   UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN
+const redis = new Redis({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const REDIS_KEY_TUNNEL_URL = 'azmew:tunnel_url';
+const REDIS_KEY_LAST_REGISTERED = 'azmew:last_registered';
+
+// Helper: Get tunnel URL from Redis
+async function getTunnelUrl() {
+    try {
+        return await redis.get(REDIS_KEY_TUNNEL_URL) || "";
+    } catch (err) {
+        console.error("❌ Redis GET error:", err.message);
+        return "";
+    }
+}
+
+// Helper: Set tunnel URL in Redis (TTL: 1 hour to auto-expire stale tunnels)
+async function setTunnelUrl(url) {
+    try {
+        await redis.set(REDIS_KEY_TUNNEL_URL, url, { ex: 3600 });
+        await redis.set(REDIS_KEY_LAST_REGISTERED, new Date().toISOString());
+        return true;
+    } catch (err) {
+        console.error("❌ Redis SET error:", err.message);
+        return false;
+    }
+}
+
+// Helper: Get last registered time
+async function getLastRegistered() {
+    try {
+        return await redis.get(REDIS_KEY_LAST_REGISTERED) || null;
+    } catch (err) {
+        return null;
+    }
+}
 
 // SECURE REGISTRATION: Update the local tunnel URL
-// In your local .env, set PROXY_AUTH_TOKEN=some_secret_key
-app.post('/_proxy/register', (req, res) => {
+app.post('/_proxy/register', async (req, res) => {
     const { url, token } = req.body;
     const SECRET_TOKEN = process.env.PROXY_AUTH_TOKEN || "azmew_dev_secret";
 
@@ -24,19 +61,27 @@ app.post('/_proxy/register', (req, res) => {
         return res.status(400).json({ error: "Invalid tunnel URL" });
     }
 
-    localTunnelUrl = url;
-    lastRegistered = new Date().toISOString();
-    console.log(`📡 Registered local tunnel: ${url} at ${lastRegistered}`);
+    const success = await setTunnelUrl(url);
+    const timestamp = new Date().toISOString();
+
+    if (!success) {
+        return res.status(500).json({ error: "Failed to persist tunnel URL" });
+    }
+
+    console.log(`📡 Registered local tunnel: ${url} at ${timestamp}`);
 
     res.json({
         status: "success",
-        registeredUrl: localTunnelUrl,
-        timestamp: lastRegistered
+        registeredUrl: url,
+        timestamp: timestamp
     });
 });
 
 // Status Page
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+    const localTunnelUrl = await getTunnelUrl();
+    const lastRegistered = await getLastRegistered();
+
     res.send(`
         <html>
             <head><title>Azmew Meta Proxy</title></head>
@@ -45,6 +90,7 @@ app.get('/', (req, res) => {
                 <p>Status: <span style="color: ${localTunnelUrl ? '#10b981' : '#ef4444'}">${localTunnelUrl ? 'ACTIVE' : 'IDLE (Waiting for local connection)'}</span></p>
                 <p>Target: <code>${localTunnelUrl || 'none'}</code></p>
                 <p>Last Activity: ${lastRegistered || 'never'}</p>
+                <p>Storage: <span style="color: #10b981">Redis (Persistent)</span></p>
                 <hr style="border: 0; border-top: 1px solid #1e293b; margin: 2rem 0;">
                 <h3>Meta Configuration:</h3>
                 <ul>
@@ -61,8 +107,6 @@ app.all('*', async (req, res) => {
     if (req.path === '/_proxy/register' || req.path === '/') return;
 
     // --- WEBHOOK VERIFICATION HANDSHAKE (GET) ---
-    // Handle this directly in the proxy to ensure Meta verification always works 
-    // even if the local tunnel is waking up or temporarily lost in memory.
     if (req.method === 'GET' && req.path === '/api/social/webhook') {
         const mode = req.query['hub.mode'];
         const token = req.query['hub.verify_token'];
@@ -77,11 +121,13 @@ app.all('*', async (req, res) => {
         }
     }
 
+    const localTunnelUrl = await getTunnelUrl();
+
     if (!localTunnelUrl) {
         return res.status(503).json({
             error: "No local development tunnel is currently registered.",
             help: "Run your local backend tunnel script (run.sh) to register.",
-            lastActivity: lastRegistered || "none"
+            lastActivity: await getLastRegistered() || "none"
         });
     }
 
@@ -97,6 +143,7 @@ app.all('*', async (req, res) => {
                 ...req.headers,
                 host: new URL(localTunnelUrl).host // Crucial for tunnel providers like Pinggy/Ngrok
             },
+            timeout: 30000, // 30s timeout to prevent hanging
             validateStatus: () => true // Forward all response codes
         });
 
@@ -111,6 +158,17 @@ app.all('*', async (req, res) => {
         res.send(response.data);
     } catch (err) {
         console.error("❌ Proxy Error:", err.message);
+
+        // If tunnel is unreachable, provide helpful error
+        if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+            return res.status(502).json({
+                error: "Local tunnel is unreachable. It may have expired or restarted.",
+                message: err.message,
+                help: "Restart your local backend (run.sh) to register a new tunnel URL.",
+                registeredUrl: localTunnelUrl
+            });
+        }
+
         res.status(500).json({
             error: "Failed to forward request to local tunnel.",
             message: err.message
