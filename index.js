@@ -5,6 +5,30 @@ const app = express();
 
 app.use(express.json());
 
+// --- REQUEST LOGGING MIDDLEWARE ---
+app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`\n============== [INCOMING REQUEST] ==============`);
+    console.log(`🕒 TIMESTAMP: ${timestamp}`);
+    console.log(`🚀 METHOD:    ${req.method}`);
+    console.log(`🔗 URL:       ${req.url}`);
+
+    // Log Query Params if present
+    if (Object.keys(req.query).length > 0) {
+        console.log(`❓ QUERY:`, JSON.stringify(req.query, null, 2));
+    }
+
+    // Log Body if present (and parsed)
+    if (req.body && Object.keys(req.body).length > 0) {
+        console.log(`📦 BODY:`, JSON.stringify(req.body, null, 2));
+    } else if (req.method === 'POST' || req.method === 'PUT') {
+        console.log(`📦 BODY: (Empty or not parsed via express.json)`);
+    }
+
+    console.log(`================================================\n`);
+    next();
+});
+
 // --- PERSISTENT STORAGE via Upstash Redis ---
 // This replaces the in-memory variable that was lost on Vercel cold starts.
 // Configure via Vercel Integration or environment variables:
@@ -151,10 +175,18 @@ app.all('*', async (req, res) => {
                 ...req.headers,
                 host: new URL(localTunnelUrl).host // Crucial for tunnel providers like Pinggy/Ngrok
             },
-            timeout: 30000, // 30s timeout to prevent hanging
-            maxRedirects: 0, // IMPORTANT: Do not follow redirects! Let the browser handle them.
-            validateStatus: () => true // Forward all response codes
+            timeout: 30000,
+            maxRedirects: 0,
+            validateStatus: () => true
         });
+
+        console.log(`\n============== [TUNNEL RESPONSE] ==============`);
+        console.log(`🔢 STATUS: ${response.status}`);
+        // Log response data (truncate if too long maybe? But user said log EVERYTHING)
+        const responseData = response.data;
+        const isObj = typeof responseData === 'object';
+        console.log(`📄 DATA:`, isObj ? JSON.stringify(responseData, null, 2) : responseData);
+        console.log(`===============================================\n`);
 
         // Forward status and headers
         res.status(response.status);
